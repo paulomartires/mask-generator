@@ -40,3 +40,28 @@
 .read-the-docs {
   color: #888;
 }
+
+/* Animation classes (CSS fallback — GSAP takes over when active) */
+.animate .stroke-path {
+  stroke-dasharray: 8 4;
+  animation: pulse-opacity 3s ease-in-out infinite alternate,
+             dash-drift 4.3s linear infinite;
+}
+
+.animate .accent-path {
+  animation: breathe 3.7s ease-in-out infinite alternate;
+}
+
+@keyframes pulse-opacity {
+  from { stroke-opacity: 0.2; }
+  to { stroke-opacity: 0.5; }
+}
+
+@keyframes breathe {
+  from { transform: scale(0.97); }
+  to { transform: scale(1.03); }
+}
+
+@keyframes dash-drift {
+  to { stroke-dashoffset: -24; }
+}

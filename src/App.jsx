@@ -1,4 +1,6 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect, useCallback, useMemo } from "react";
+import gsap from "gsap";
+import UPNG from "upng-js";
 
 const QUARTER_CORNERS = ["tl", "tr", "bl", "br"];
 const HALF_EDGES = ["top", "bottom", "left", "right"];
@@ -158,6 +160,55 @@ function generateGrid(rng, params) {
   return grid;
 }
 
+// LCM of animation periods — used for seamless loop duration calculation
+// Stroke opacity: 3s, Accent breathe: 3.7s, Dash drift: 4.3s
+// We use 3s as the base loop since it gives a clean loop point
+const ANIM_DURATIONS = { strokeOpacity: 3, breathe: 3.7, dashDrift: 4.3 };
+const LOOP_DURATION_OPTIONS = [3, 5, 8];
+
+function buildAnimationTimeline(svgEl) {
+  const tl = gsap.timeline({ paused: true });
+
+  const strokePaths = svgEl.querySelectorAll(".stroke-path");
+  const accentPaths = svgEl.querySelectorAll(".accent-path");
+
+  // Stroke opacity pulse: 0.2 → 0.5 over 1.5s, yoyo (3s full cycle)
+  if (strokePaths.length) {
+    tl.to(strokePaths, {
+      attr: { "stroke-opacity": 0.5 },
+      duration: ANIM_DURATIONS.strokeOpacity / 2,
+      yoyo: true,
+      repeat: 1,
+      ease: "sine.inOut",
+    }, 0);
+
+    // Stroke dash drift
+    tl.fromTo(strokePaths, {
+      attr: { "stroke-dashoffset": 0 },
+    }, {
+      attr: { "stroke-dashoffset": -24 },
+      duration: ANIM_DURATIONS.dashDrift,
+      ease: "none",
+    }, 0);
+  }
+
+  // Accent breathing: scale 0.97 → 1.03
+  if (accentPaths.length) {
+    tl.fromTo(accentPaths, {
+      scale: 0.97,
+    }, {
+      scale: 1.03,
+      duration: ANIM_DURATIONS.breathe / 2,
+      yoyo: true,
+      repeat: 1,
+      ease: "sine.inOut",
+      svgOrigin: undefined, // set per-element below
+    }, 0);
+  }
+
+  return tl;
+}
+
 export default function MaskPatternGenerator() {
   const [seed, setSeed] = useState(42);
   const [bgColor, setBgColor] = useState(DEFAULT_PALETTE.bg);
@@ -169,7 +220,14 @@ export default function MaskPatternGenerator() {
     flowMode: true,
     accents: DEFAULT_PALETTE.accents,
   });
+  const [animateEnabled, setAnimateEnabled] = useState(false);
+  const [exportingAnim, setExportingAnim] = useState(false);
+  const [exportProgress, setExportProgress] = useState(0);
+  const [loopDuration, setLoopDuration] = useState(3);
+
   const svgRef = useRef(null);
+  const timelineRef = useRef(null);
+  const animFrameRef = useRef(null);
 
   const canvasSize = 600;
   const cellSize = canvasSize / 3;
@@ -191,8 +249,95 @@ export default function MaskPatternGenerator() {
     setParams((p) => ({ ...p, accents: next }));
   };
 
+  // Build cells with positions
+  const cells = useMemo(() => {
+    const result = [];
+    grid.forEach((row, ri) => {
+      row.forEach((cell, ci) => {
+        result.push({ ...cell, cx: ci * cellSize, cy: ri * cellSize, ri, ci });
+      });
+    });
+    return result;
+  }, [grid, cellSize]);
+
+  // Build the mask path: full canvas rect, then subtract cutout arc shapes using evenodd
+  const cutoutHoles = cells
+    .filter(c => c.type === "cutout")
+    .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
+    .join(" ");
+
+  const maskPath = `M 0 0 H ${canvasSize} V ${canvasSize} H 0 Z ${cutoutHoles}`;
+
+  const stats = { cutout: 0, accent: 0, stroke: 0, solid: 0 };
+  cells.forEach(c => stats[c.type]++);
+
+  // GSAP animation setup
+  useEffect(() => {
+    if (!svgRef.current) return;
+
+    // Kill previous timeline
+    if (timelineRef.current) {
+      timelineRef.current.kill();
+      timelineRef.current = null;
+    }
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+
+    if (!animateEnabled) {
+      // Reset stroke attributes when animation is off
+      const strokePaths = svgRef.current.querySelectorAll(".stroke-path");
+      const accentPaths = svgRef.current.querySelectorAll(".accent-path");
+      strokePaths.forEach(el => {
+        el.removeAttribute("stroke-dasharray");
+        el.removeAttribute("stroke-dashoffset");
+        el.setAttribute("stroke-opacity", "0.4");
+      });
+      accentPaths.forEach(el => {
+        el.removeAttribute("transform");
+      });
+      return;
+    }
+
+    // Set up stroke-dasharray on stroke paths
+    const strokePaths = svgRef.current.querySelectorAll(".stroke-path");
+    strokePaths.forEach(el => {
+      el.setAttribute("stroke-dasharray", "8 4");
+      el.setAttribute("stroke-opacity", "0.2");
+    });
+
+    // Set transform-origin on accent paths
+    const accentPaths = svgRef.current.querySelectorAll(".accent-path");
+    accentPaths.forEach(el => {
+      const cx = parseFloat(el.dataset.cx) + cellSize / 2;
+      const cy = parseFloat(el.dataset.cy) + cellSize / 2;
+      gsap.set(el, { svgOrigin: `${cx} ${cy}`, scale: 1 });
+    });
+
+    const tl = buildAnimationTimeline(svgRef.current);
+    timelineRef.current = tl;
+
+    // Play loop using requestAnimationFrame for smooth playback
+    const totalDuration = tl.duration();
+    let startTime = null;
+
+    function tick(now) {
+      if (!startTime) startTime = now;
+      const elapsed = (now - startTime) / 1000; // seconds
+      const progress = (elapsed % totalDuration) / totalDuration;
+      tl.progress(progress);
+      animFrameRef.current = requestAnimationFrame(tick);
+    }
+    animFrameRef.current = requestAnimationFrame(tick);
+
+    return () => {
+      tl.kill();
+      if (animFrameRef.current) cancelAnimationFrame(animFrameRef.current);
+    };
+  }, [animateEnabled, seed, cellSize]);
+
   const exportSVG = () => {
-    // SVG with overlay color mask (holes for cutouts), accent shapes, and strokes
     const cutoutHolesPaths = cells
       .filter(c => c.type === "cutout")
       .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
@@ -231,26 +376,144 @@ export default function MaskPatternGenerator() {
     URL.revokeObjectURL(url);
   };
 
-  // Build cells with positions
-  const cells = [];
-  grid.forEach((row, ri) => {
-    row.forEach((cell, ci) => {
-      cells.push({ ...cell, cx: ci * cellSize, cy: ri * cellSize, ri, ci });
+  // Build an SVG string for a single animation frame (no <image>, transparent cutouts)
+  const buildFrameSVG = useCallback((frameTimeline, progress) => {
+    // Seek timeline to the given progress
+    frameTimeline.progress(progress);
+
+    // Read current animated values from the DOM
+    const strokePaths = svgRef.current.querySelectorAll(".stroke-path");
+    const accentPaths = svgRef.current.querySelectorAll(".accent-path");
+
+    const cutoutHolesPaths = cells
+      .filter(c => c.type === "cutout")
+      .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
+      .join(" ");
+
+    const frameMaskPath = `M 0 0 H ${canvasSize} V ${canvasSize} H 0 Z ${cutoutHolesPaths}`;
+
+    const elements = [];
+    elements.push(`<path d="${frameMaskPath}" fill="${bgColor}" fill-rule="evenodd"/>`);
+
+    // Accent shapes with current transform
+    let accentIdx = 0;
+    cells.filter(c => c.type === "accent").forEach((cell) => {
+      const d = getShapePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
+      const el = accentPaths[accentIdx];
+      const transform = el ? el.getAttribute("transform") || "" : "";
+      const centerX = cell.cx + cellSize / 2;
+      const centerY = cell.cy + cellSize / 2;
+      // Extract scale from GSAP-applied transform
+      const scaleMatch = transform.match(/matrix\(([^,]+)/);
+      const scale = scaleMatch ? parseFloat(scaleMatch[1]) : 1;
+      elements.push(`<path d="${d}" fill="${cell.accentColor}" transform="translate(${centerX}, ${centerY}) scale(${scale}) translate(${-centerX}, ${-centerY})"/>`);
+      accentIdx++;
     });
-  });
 
-  // Build the mask path: full canvas rect, then subtract cutout arc shapes using evenodd
-  // Cutout cells get holes so image shows through their arc
-  // Accent cells also get holes (accent shape drawn on top separately)
-  const cutoutHoles = cells
-    .filter(c => c.type === "cutout")
-    .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
-    .join(" ");
+    // Stroke outlines with current opacity and dash offset
+    let strokeIdx = 0;
+    cells.filter(c => c.type === "stroke").forEach((cell) => {
+      const d = getStrokePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
+      const el = strokePaths[strokeIdx];
+      const opacity = el ? el.getAttribute("stroke-opacity") || "0.4" : "0.4";
+      const dashOffset = el ? el.getAttribute("stroke-dashoffset") || "0" : "0";
+      elements.push(`<path d="${d}" fill="none" stroke="${accents[0]}" stroke-opacity="${opacity}" stroke-width="1.5" stroke-dasharray="8 4" stroke-dashoffset="${dashOffset}"/>`);
+      strokeIdx++;
+    });
 
-  const maskPath = `M 0 0 H ${canvasSize} V ${canvasSize} H 0 Z ${cutoutHoles}`;
+    return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${canvasSize} ${canvasSize}" width="${canvasSize}" height="${canvasSize}">
+  ${elements.join("\n  ")}
+</svg>`;
+  }, [cells, canvasSize, cellSize, bgColor, accents]);
 
-  const stats = { cutout: 0, accent: 0, stroke: 0, solid: 0 };
-  cells.forEach(c => stats[c.type]++);
+  const exportAnimation = useCallback(async () => {
+    if (!svgRef.current || exportingAnim) return;
+
+    setExportingAnim(true);
+    setExportProgress(0);
+
+    const fps = 30;
+    const totalFrames = Math.round(loopDuration * fps);
+    const frames = [];
+
+    // Use the existing timeline for frame seeking
+    const tl = timelineRef.current;
+    if (!tl) {
+      setExportingAnim(false);
+      return;
+    }
+
+    // Pause the live animation loop during export
+    if (animFrameRef.current) {
+      cancelAnimationFrame(animFrameRef.current);
+      animFrameRef.current = null;
+    }
+
+    const offCanvas = document.createElement("canvas");
+    offCanvas.width = canvasSize;
+    offCanvas.height = canvasSize;
+    const ctx = offCanvas.getContext("2d");
+
+    for (let i = 0; i < totalFrames; i++) {
+      const progress = i / totalFrames;
+      const svgString = buildFrameSVG(tl, progress);
+
+      // Render SVG to canvas
+      const img = new Image();
+      const blob = new Blob([svgString], { type: "image/svg+xml;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+
+      await new Promise((resolve, reject) => {
+        img.onload = () => {
+          ctx.clearRect(0, 0, canvasSize, canvasSize);
+          ctx.drawImage(img, 0, 0, canvasSize, canvasSize);
+          URL.revokeObjectURL(url);
+
+          const imageData = ctx.getImageData(0, 0, canvasSize, canvasSize);
+          frames.push(imageData.data.buffer.slice(0));
+          resolve();
+        };
+        img.onerror = reject;
+        img.src = url;
+      });
+
+      setExportProgress(Math.round(((i + 1) / totalFrames) * 100));
+
+      // Yield to keep UI responsive
+      if (i % 5 === 0) await new Promise(r => setTimeout(r, 0));
+    }
+
+    // Encode as APNG
+    const delayMs = Math.round(1000 / fps);
+    const delays = new Array(totalFrames).fill(delayMs);
+    const apngBuffer = UPNG.encode(frames, canvasSize, canvasSize, 0, delays);
+
+    // Download
+    const apngBlob = new Blob([apngBuffer], { type: "image/png" });
+    const downloadUrl = URL.createObjectURL(apngBlob);
+    const a = document.createElement("a");
+    a.href = downloadUrl;
+    a.download = `mask-animation-${seed}-${loopDuration}s.apng`;
+    a.click();
+    URL.revokeObjectURL(downloadUrl);
+
+    setExportingAnim(false);
+    setExportProgress(0);
+
+    // Resume live animation
+    if (animateEnabled && timelineRef.current) {
+      const totalDuration = timelineRef.current.duration();
+      let startTime = null;
+      function tick(now) {
+        if (!startTime) startTime = now;
+        const elapsed = (now - startTime) / 1000;
+        const prog = (elapsed % totalDuration) / totalDuration;
+        timelineRef.current.progress(prog);
+        animFrameRef.current = requestAnimationFrame(tick);
+      }
+      animFrameRef.current = requestAnimationFrame(tick);
+    }
+  }, [animateEnabled, buildFrameSVG, canvasSize, exportingAnim, loopDuration, seed]);
 
   return (
     <div style={{
@@ -277,6 +540,21 @@ export default function MaskPatternGenerator() {
           <button onClick={exportSVG} style={{ ...btnStyle, background: "#e87d3e22", color: "#e87d3e", borderColor: "#e87d3e44" }}>
             Export SVG
           </button>
+          {animateEnabled && (
+            <button
+              onClick={exportAnimation}
+              disabled={exportingAnim}
+              style={{
+                ...btnStyle,
+                background: exportingAnim ? "#9b6fbf11" : "#9b6fbf22",
+                color: "#9b6fbf",
+                borderColor: "#9b6fbf44",
+                opacity: exportingAnim ? 0.6 : 1,
+              }}
+            >
+              {exportingAnim ? `Exporting ${exportProgress}%` : "Export Animation"}
+            </button>
+          )}
         </div>
       </div>
 
@@ -300,13 +578,32 @@ export default function MaskPatternGenerator() {
             {/* Layer 3: Accent shapes — drawn on top of the mask */}
             {cells.filter(c => c.type === "accent").map((cell, i) => {
               const d = getShapePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
-              return <path key={`a-${i}`} d={d} fill={cell.accentColor} />;
+              return (
+                <path
+                  key={`a-${i}`}
+                  className="accent-path"
+                  d={d}
+                  fill={cell.accentColor}
+                  data-cx={cell.cx}
+                  data-cy={cell.cy}
+                />
+              );
             })}
 
             {/* Layer 4: Stroke outlines */}
             {cells.filter(c => c.type === "stroke").map((cell, i) => {
               const d = getStrokePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
-              return <path key={`s-${i}`} d={d} fill="none" stroke={accents[0]} strokeOpacity="0.4" strokeWidth="1.5" />;
+              return (
+                <path
+                  key={`s-${i}`}
+                  className="stroke-path"
+                  d={d}
+                  fill="none"
+                  stroke={accents[0]}
+                  strokeOpacity="0.4"
+                  strokeWidth="1.5"
+                />
+              );
             })}
           </svg>
         </div>
@@ -361,10 +658,44 @@ export default function MaskPatternGenerator() {
               </button>
             </div>
 
+            <div style={{ marginBottom: 16 }}>
+              <button onClick={() => setAnimateEnabled(a => !a)}
+                style={{
+                  ...chipStyle, width: "100%", textAlign: "center",
+                  background: animateEnabled ? "#9b6fbf22" : "#1a2a33",
+                  borderColor: animateEnabled ? "#9b6fbf" : "#2a3e4d",
+                  color: animateEnabled ? "#c8a4e8" : "#8aa4b8",
+                }}>
+                Animate: {animateEnabled ? "ON" : "OFF"}
+              </button>
+            </div>
+
+            {animateEnabled && (
+              <>
+                <div style={sectionLabel}>Loop Duration</div>
+                <div style={{ display: "flex", gap: 4, marginBottom: 16 }}>
+                  {LOOP_DURATION_OPTIONS.map(d => (
+                    <button
+                      key={d}
+                      onClick={() => setLoopDuration(d)}
+                      style={{
+                        ...chipStyle, flex: 1, textAlign: "center",
+                        background: loopDuration === d ? "#9b6fbf22" : "#1a2a33",
+                        borderColor: loopDuration === d ? "#9b6fbf" : "#2a3e4d",
+                        color: loopDuration === d ? "#c8a4e8" : "#8aa4b8",
+                      }}
+                    >
+                      {d}s
+                    </button>
+                  ))}
+                </div>
+              </>
+            )}
+
             <div style={sectionLabel}>Grid Map</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 2, marginBottom: 12 }}>
               {grid.flat().map((cell, i) => {
-                const icons = { cutout: "◐", accent: "●", stroke: "○", solid: "■" };
+                const icons = { cutout: "\u25D0", accent: "\u25CF", stroke: "\u25CB", solid: "\u25A0" };
                 const colors = {
                   cutout: "#ffffff20", accent: cell.accentColor + "55",
                   stroke: "#ffffff10", solid: bgColor + "88",
@@ -377,7 +708,7 @@ export default function MaskPatternGenerator() {
                   }}>
                     <span style={{ fontSize: 12 }}>{icons[cell.type]}</span>
                     <span style={{ fontSize: 7 }}>
-                      {cell.type !== "solid" ? `${cell.shape === "half" ? "½" : "¼"} ${cell.variant}` : "solid"}
+                      {cell.type !== "solid" ? `${cell.shape === "half" ? "\u00BD" : "\u00BC"} ${cell.variant}` : "solid"}
                     </span>
                   </div>
                 );
