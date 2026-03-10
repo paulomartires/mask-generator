@@ -2,10 +2,22 @@ import { useState, useRef } from "react";
 
 const QUARTER_CORNERS = ["tl", "tr", "bl", "br"];
 const HALF_EDGES = ["top", "bottom", "left", "right"];
+const TRIANGLE_CORNERS = ["tl", "tr", "bl", "br"];
+const HEXAGON_VARIANTS = ["flat", "pointy"];
+const HALF_HEXAGON_EDGES = ["top", "bottom", "left", "right"];
 
 const DEFAULT_PALETTE = {
   bg: "#1A2A34",
   accents: ["#b8d4e3", "#9b6fbf", "#e87d3e"],
+};
+
+const DEFAULT_PARAMS = {
+  flowMode: true,
+  accents: DEFAULT_PALETTE.accents,
+  shapeWeights: { quarter: 8, half: 2, square: 0, "half-square": 0, triangle: 0, "half-triangle": 0, hexagon: 0, "half-hexagon": 0 },
+  cellTypeCounts: { accent: 2, stroke: 2, solid: 1 },
+  strokeWidth: 1.5,
+  strokeOpacity: 0.4,
 };
 
 const SAMPLE_IMAGES = [
@@ -43,27 +55,130 @@ function halfShapePath(cx, cy, s, edge) {
   }
 }
 
+function squarePath(cx, cy, s) {
+  return `M ${cx} ${cy} H ${cx + s} V ${cy + s} H ${cx} Z`;
+}
+
+function trianglePath(cx, cy, s, corner) {
+  switch (corner) {
+    case "tl": return `M ${cx} ${cy} L ${cx + s} ${cy} L ${cx} ${cy + s} Z`;
+    case "tr": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} L ${cx} ${cy} Z`;
+    case "br": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} L ${cx + s} ${cy} Z`;
+    case "bl": return `M ${cx} ${cy + s} L ${cx} ${cy} L ${cx + s} ${cy + s} Z`;
+    default: return "";
+  }
+}
+
+function hexagonPath(cx, cy, s, variant) {
+  const r = s / 2;
+  const centerX = cx + r;
+  const centerY = cy + r;
+  const startAngle = variant === "pointy" ? Math.PI / 6 : 0;
+  const points = [];
+  for (let i = 0; i < 6; i++) {
+    const angle = startAngle + (i * Math.PI) / 3;
+    points.push([centerX + r * Math.cos(angle), centerY + r * Math.sin(angle)]);
+  }
+  return `M ${points[0][0]} ${points[0][1]} ` +
+    points.slice(1).map(p => `L ${p[0]} ${p[1]}`).join(" ") + " Z";
+}
+
+function halfSquarePath(cx, cy, s, edge) {
+  const h = s / 2;
+  switch (edge) {
+    case "top":    return `M ${cx} ${cy} H ${cx + s} V ${cy + h} H ${cx} Z`;
+    case "bottom": return `M ${cx} ${cy + h} H ${cx + s} V ${cy + s} H ${cx} Z`;
+    case "left":   return `M ${cx} ${cy} H ${cx + h} V ${cy + s} H ${cx} Z`;
+    case "right":  return `M ${cx + h} ${cy} H ${cx + s} V ${cy + s} H ${cx + h} Z`;
+    default: return "";
+  }
+}
+
+function halfTrianglePath(cx, cy, s, corner) {
+  // Small right triangle occupying a quarter of the cell (half of the full diagonal triangle)
+  const h = s / 2;
+  switch (corner) {
+    case "tl": return `M ${cx} ${cy} L ${cx + h} ${cy} L ${cx} ${cy + h} Z`;
+    case "tr": return `M ${cx + s} ${cy} L ${cx + s} ${cy + h} L ${cx + h} ${cy} Z`;
+    case "br": return `M ${cx + s} ${cy + s} L ${cx + h} ${cy + s} L ${cx + s} ${cy + h} Z`;
+    case "bl": return `M ${cx} ${cy + s} L ${cx} ${cy + h} L ${cx + h} ${cy + s} Z`;
+    default: return "";
+  }
+}
+
+function halfHexagonPath(cx, cy, s, edge) {
+  // Trapezoid half of a hexagon cut through center
+  const r = s / 2;
+  const cx2 = cx + r;
+  const cy2 = cy + r;
+  const h = r * Math.sqrt(3) / 2; // sin(60°) * r
+  switch (edge) {
+    // Top/bottom: cut flat hex horizontally at center
+    case "top":    return `M ${cx} ${cy2} L ${cx2 - r / 2} ${cy2 - h} L ${cx2 + r / 2} ${cy2 - h} L ${cx + s} ${cy2} Z`;
+    case "bottom": return `M ${cx} ${cy2} L ${cx2 - r / 2} ${cy2 + h} L ${cx2 + r / 2} ${cy2 + h} L ${cx + s} ${cy2} Z`;
+    // Left/right: cut pointy hex vertically at center
+    case "left":   return `M ${cx2} ${cy} L ${cx2 - h} ${cy2 - r / 2} L ${cx2 - h} ${cy2 + r / 2} L ${cx2} ${cy + s} Z`;
+    case "right":  return `M ${cx2} ${cy} L ${cx2 + h} ${cy2 - r / 2} L ${cx2 + h} ${cy2 + r / 2} L ${cx2} ${cy + s} Z`;
+    default: return "";
+  }
+}
+
 function getShapePath(cx, cy, s, shape, variant) {
-  return shape === "quarter" ? quarterPath(cx, cy, s, variant) : halfShapePath(cx, cy, s, variant);
+  switch (shape) {
+    case "quarter":      return quarterPath(cx, cy, s, variant);
+    case "half":         return halfShapePath(cx, cy, s, variant);
+    case "square":       return squarePath(cx, cy, s);
+    case "half-square":  return halfSquarePath(cx, cy, s, variant);
+    case "triangle":     return trianglePath(cx, cy, s, variant);
+    case "half-triangle":return halfTrianglePath(cx, cy, s, variant);
+    case "hexagon":      return hexagonPath(cx, cy, s, variant);
+    case "half-hexagon": return halfHexagonPath(cx, cy, s, variant);
+    default: return quarterPath(cx, cy, s, variant);
+  }
 }
 
 function getStrokePath(cx, cy, s, shape, variant) {
-  if (shape === "quarter") {
-    switch (variant) {
-      case "tl": return `M ${cx} ${cy} L ${cx + s} ${cy} A ${s} ${s} 0 0 1 ${cx} ${cy + s} L ${cx} ${cy}`;
-      case "tr": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} A ${s} ${s} 0 0 1 ${cx} ${cy} L ${cx + s} ${cy}`;
-      case "br": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} A ${s} ${s} 0 0 1 ${cx + s} ${cy} L ${cx + s} ${cy + s}`;
-      case "bl": return `M ${cx} ${cy + s} L ${cx} ${cy} A ${s} ${s} 0 0 1 ${cx + s} ${cy + s} L ${cx} ${cy + s}`;
-      default: return "";
+  switch (shape) {
+    case "quarter": {
+      switch (variant) {
+        case "tl": return `M ${cx} ${cy} L ${cx + s} ${cy} A ${s} ${s} 0 0 1 ${cx} ${cy + s} L ${cx} ${cy}`;
+        case "tr": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} A ${s} ${s} 0 0 1 ${cx} ${cy} L ${cx + s} ${cy}`;
+        case "br": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} A ${s} ${s} 0 0 1 ${cx + s} ${cy} L ${cx + s} ${cy + s}`;
+        case "bl": return `M ${cx} ${cy + s} L ${cx} ${cy} A ${s} ${s} 0 0 1 ${cx + s} ${cy + s} L ${cx} ${cy + s}`;
+        default: return "";
+      }
     }
-  }
-  const r = s / 2;
-  switch (variant) {
-    case "top": return `M ${cx} ${cy} L ${cx + s} ${cy} A ${r} ${r} 0 1 1 ${cx} ${cy}`;
-    case "bottom": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} A ${r} ${r} 0 1 1 ${cx + s} ${cy + s}`;
-    case "left": return `M ${cx} ${cy + s} L ${cx} ${cy} A ${r} ${r} 0 1 1 ${cx} ${cy + s}`;
-    case "right": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} A ${r} ${r} 0 1 1 ${cx + s} ${cy}`;
-    default: return "";
+    case "half": {
+      const r = s / 2;
+      switch (variant) {
+        case "top": return `M ${cx} ${cy} L ${cx + s} ${cy} A ${r} ${r} 0 1 1 ${cx} ${cy}`;
+        case "bottom": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} A ${r} ${r} 0 1 1 ${cx + s} ${cy + s}`;
+        case "left": return `M ${cx} ${cy + s} L ${cx} ${cy} A ${r} ${r} 0 1 1 ${cx} ${cy + s}`;
+        case "right": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} A ${r} ${r} 0 1 1 ${cx + s} ${cy}`;
+        default: return "";
+      }
+    }
+    case "square":
+      return `M ${cx} ${cy} H ${cx + s} V ${cy + s} H ${cx} Z`;
+    case "half-square":
+      return halfSquarePath(cx, cy, s, variant);
+    case "triangle": {
+      switch (variant) {
+        case "tl": return `M ${cx} ${cy} L ${cx + s} ${cy} L ${cx} ${cy + s} L ${cx} ${cy}`;
+        case "tr": return `M ${cx + s} ${cy} L ${cx + s} ${cy + s} L ${cx} ${cy} L ${cx + s} ${cy}`;
+        case "br": return `M ${cx + s} ${cy + s} L ${cx} ${cy + s} L ${cx + s} ${cy} L ${cx + s} ${cy + s}`;
+        case "bl": return `M ${cx} ${cy + s} L ${cx} ${cy} L ${cx + s} ${cy + s} L ${cx} ${cy + s}`;
+        default: return "";
+      }
+    }
+    case "half-triangle":
+      return halfTrianglePath(cx, cy, s, variant);
+    case "hexagon":
+      return hexagonPath(cx, cy, s, variant);
+    case "half-hexagon":
+      return halfHexagonPath(cx, cy, s, variant);
+    default:
+      return getStrokePath(cx, cy, s, "quarter", variant);
   }
 }
 
@@ -77,25 +192,46 @@ function isAdjacentToAny(pos, positions) {
   return positions.some(p => areAdjacent(pos, p));
 }
 
-function pickVariant(rng, shape, grid, row, col, flowMode) {
-  if (shape === "half") return HALF_EDGES[Math.floor(rng() * 4)];
+function pickShape(rng, shapeWeights) {
+  const entries = Object.entries(shapeWeights).filter(([, w]) => w > 0);
+  if (!entries.length) return "quarter";
+  const total = entries.reduce((s, [, w]) => s + w, 0);
+  let r = rng() * total;
+  for (const [shape, w] of entries) {
+    r -= w;
+    if (r <= 0) return shape;
+  }
+  return entries[0][0];
+}
 
-  // Flow-aware quarter corner picking
-  if (flowMode && col > 0 && grid[row]?.[col - 1]) {
-    const prev = grid[row][col - 1];
-    if (prev.shape === "quarter" && prev.type !== "solid") {
-      if (prev.variant === "tr") return rng() < 0.7 ? "tl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
-      if (prev.variant === "br") return rng() < 0.7 ? "bl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
+function pickVariant(rng, shape, grid, row, col, flowMode) {
+  switch (shape) {
+    case "half":         return HALF_EDGES[Math.floor(rng() * 4)];
+    case "square":       return "full";
+    case "half-square":  return HALF_EDGES[Math.floor(rng() * 4)];
+    case "triangle":     return TRIANGLE_CORNERS[Math.floor(rng() * 4)];
+    case "half-triangle":return TRIANGLE_CORNERS[Math.floor(rng() * 4)];
+    case "hexagon":      return HEXAGON_VARIANTS[Math.floor(rng() * 2)];
+    case "half-hexagon": return HALF_HEXAGON_EDGES[Math.floor(rng() * 4)];
+    default: {
+      // Flow-aware quarter corner picking
+      if (flowMode && col > 0 && grid[row]?.[col - 1]) {
+        const prev = grid[row][col - 1];
+        if (prev.shape === "quarter" && prev.type !== "solid") {
+          if (prev.variant === "tr") return rng() < 0.7 ? "tl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
+          if (prev.variant === "br") return rng() < 0.7 ? "bl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
+        }
+      }
+      if (flowMode && row > 0 && grid[row - 1]?.[col]) {
+        const prev = grid[row - 1][col];
+        if (prev.shape === "quarter" && prev.type !== "solid") {
+          if (prev.variant === "bl") return rng() < 0.7 ? "tl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
+          if (prev.variant === "br") return rng() < 0.7 ? "tr" : QUARTER_CORNERS[Math.floor(rng() * 4)];
+        }
+      }
+      return QUARTER_CORNERS[Math.floor(rng() * 4)];
     }
   }
-  if (flowMode && row > 0 && grid[row - 1]?.[col]) {
-    const prev = grid[row - 1][col];
-    if (prev.shape === "quarter" && prev.type !== "solid") {
-      if (prev.variant === "bl") return rng() < 0.7 ? "tl" : QUARTER_CORNERS[Math.floor(rng() * 4)];
-      if (prev.variant === "br") return rng() < 0.7 ? "tr" : QUARTER_CORNERS[Math.floor(rng() * 4)];
-    }
-  }
-  return QUARTER_CORNERS[Math.floor(rng() * 4)];
 }
 
 function generateGrid(rng, params) {
@@ -110,21 +246,22 @@ function generateGrid(rng, params) {
 
   const assignments = {};
   const key = (r, c) => `${r},${c}`;
+  const counts = params.cellTypeCounts;
 
-  // Place exactly 2 accent cells, non-adjacent
+  // Place accent cells, non-adjacent
   const accentPositions = [];
   for (const pos of allPositions) {
-    if (accentPositions.length >= 2) break;
+    if (accentPositions.length >= counts.accent) break;
     if (!isAdjacentToAny(pos, accentPositions)) {
       accentPositions.push(pos);
       assignments[key(pos[0], pos[1])] = "accent";
     }
   }
 
-  // Place exactly 2 stroke cells, non-adjacent to each other and not on accent cells
+  // Place stroke cells, non-adjacent to each other and not on accent cells
   const strokePositions = [];
   for (const pos of allPositions) {
-    if (strokePositions.length >= 2) break;
+    if (strokePositions.length >= counts.stroke) break;
     if (assignments[key(pos[0], pos[1])]) continue;
     if (!isAdjacentToAny(pos, strokePositions)) {
       strokePositions.push(pos);
@@ -132,10 +269,10 @@ function generateGrid(rng, params) {
     }
   }
 
-  // Place up to 2 solid cells, non-adjacent to each other and not on taken cells
+  // Place solid cells, non-adjacent to each other and not on taken cells
   const solidPositions = [];
   for (const pos of allPositions) {
-    if (solidPositions.length >= 2) break;
+    if (solidPositions.length >= counts.solid) break;
     if (assignments[key(pos[0], pos[1])]) continue;
     if (!isAdjacentToAny(pos, solidPositions)) {
       solidPositions.push(pos);
@@ -148,8 +285,8 @@ function generateGrid(rng, params) {
   for (let r = 0; r < 3; r++) {
     for (let c = 0; c < 3; c++) {
       const type = assignments[key(r, c)] || "cutout";
-      const shape = rng() < 0.2 ? "half" : "quarter";
-      const variant = type === "solid" ? "tl" : pickVariant(rng, shape, grid, r, c, params.flowMode);
+      const shape = pickShape(rng, params.shapeWeights);
+      const variant = type === "solid" ? pickVariant(rng, shape, grid, r, c, false) : pickVariant(rng, shape, grid, r, c, params.flowMode);
       const accentColor = params.accents[Math.floor(rng() * params.accents.length)];
       grid[r][c] = { type, shape, variant, accentColor };
     }
@@ -165,10 +302,7 @@ export default function MaskPatternGenerator() {
   const [imageUrl, setImageUrl] = useState(SAMPLE_IMAGES[0]);
   const [imageIdx, setImageIdx] = useState(0);
   const [showControls, setShowControls] = useState(true);
-  const [params, setParams] = useState({
-    flowMode: true,
-    accents: DEFAULT_PALETTE.accents,
-  });
+  const [params, setParams] = useState(DEFAULT_PARAMS);
   const svgRef = useRef(null);
 
   const canvasSize = 600;
@@ -191,8 +325,35 @@ export default function MaskPatternGenerator() {
     setParams((p) => ({ ...p, accents: next }));
   };
 
+  const updateShapeWeight = (shape, delta) => {
+    setParams(p => ({
+      ...p,
+      shapeWeights: {
+        ...p.shapeWeights,
+        [shape]: Math.max(0, Math.min(10, (p.shapeWeights[shape] || 0) + delta)),
+      },
+    }));
+  };
+
+  const updateCellCount = (type, delta) => {
+    setParams(p => ({
+      ...p,
+      cellTypeCounts: {
+        ...p.cellTypeCounts,
+        [type]: Math.max(0, Math.min(4, p.cellTypeCounts[type] + delta)),
+      },
+    }));
+  };
+
+  // Build cells with positions
+  const cells = [];
+  grid.forEach((row, ri) => {
+    row.forEach((cell, ci) => {
+      cells.push({ ...cell, cx: ci * cellSize, cy: ri * cellSize, ri, ci });
+    });
+  });
+
   const exportSVG = () => {
-    // SVG with overlay color mask (holes for cutouts), accent shapes, and strokes
     const cutoutHolesPaths = cells
       .filter(c => c.type === "cutout")
       .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
@@ -202,19 +363,16 @@ export default function MaskPatternGenerator() {
 
     const elements = [];
 
-    // Overlay color with arc holes punched through
     elements.push(`<path d="${exportMaskPath}" fill="${bgColor}" fill-rule="evenodd"/>`);
 
-    // Accent shapes
     cells.filter(c => c.type === "accent").forEach((cell) => {
       const d = getShapePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
       elements.push(`<path d="${d}" fill="${cell.accentColor}"/>`);
     });
 
-    // Stroke outlines
     cells.filter(c => c.type === "stroke").forEach((cell) => {
       const d = getStrokePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
-      elements.push(`<path d="${d}" fill="none" stroke="${accents[0]}" stroke-opacity="0.4" stroke-width="1.5"/>`);
+      elements.push(`<path d="${d}" fill="none" stroke="${accents[0]}" stroke-opacity="${params.strokeOpacity}" stroke-width="${params.strokeWidth}"/>`);
     });
 
     const svgString = `<?xml version="1.0" encoding="UTF-8"?>
@@ -231,17 +389,7 @@ export default function MaskPatternGenerator() {
     URL.revokeObjectURL(url);
   };
 
-  // Build cells with positions
-  const cells = [];
-  grid.forEach((row, ri) => {
-    row.forEach((cell, ci) => {
-      cells.push({ ...cell, cx: ci * cellSize, cy: ri * cellSize, ri, ci });
-    });
-  });
-
   // Build the mask path: full canvas rect, then subtract cutout arc shapes using evenodd
-  // Cutout cells get holes so image shows through their arc
-  // Accent cells also get holes (accent shape drawn on top separately)
   const cutoutHoles = cells
     .filter(c => c.type === "cutout")
     .map(c => getShapePath(c.cx, c.cy, cellSize, c.shape, c.variant))
@@ -251,6 +399,17 @@ export default function MaskPatternGenerator() {
 
   const stats = { cutout: 0, accent: 0, stroke: 0, solid: 0 };
   cells.forEach(c => stats[c.type]++);
+
+  const shapeRows = [
+    { id: "quarter",      label: "Quarter",      icon: "¼○" },
+    { id: "half",         label: "Half Circle",  icon: "½○" },
+    { id: "square",       label: "Square",       icon: "□"  },
+    { id: "half-square",  label: "Half Square",  icon: "▬"  },
+    { id: "triangle",     label: "Triangle",     icon: "△"  },
+    { id: "half-triangle",label: "Half Tri",     icon: "◺"  },
+    { id: "hexagon",      label: "Hexagon",      icon: "⬡"  },
+    { id: "half-hexagon", label: "Half Hex",     icon: "⬡½" },
+  ];
 
   return (
     <div style={{
@@ -306,7 +465,7 @@ export default function MaskPatternGenerator() {
             {/* Layer 4: Stroke outlines */}
             {cells.filter(c => c.type === "stroke").map((cell, i) => {
               const d = getStrokePath(cell.cx, cell.cy, cellSize, cell.shape, cell.variant);
-              return <path key={`s-${i}`} d={d} fill="none" stroke={accents[0]} strokeOpacity="0.4" strokeWidth="1.5" />;
+              return <path key={`s-${i}`} d={d} fill="none" stroke={accents[0]} strokeOpacity={params.strokeOpacity} strokeWidth={params.strokeWidth} />;
             })}
           </svg>
         </div>
@@ -361,10 +520,65 @@ export default function MaskPatternGenerator() {
               </button>
             </div>
 
+            <div style={sectionLabel}>Shapes</div>
+            <div style={{ marginBottom: 16 }}>
+              {shapeRows.map(({ id, label, icon }) => {
+                const w = params.shapeWeights[id];
+                return (
+                  <div key={id} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                    <span style={{ color: w > 0 ? "#c8d8e4" : "#3a5060", fontSize: 11 }}>
+                      {icon} {label}
+                    </span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => updateShapeWeight(id, -1)} style={stepper}>−</button>
+                      <span style={{ width: 18, textAlign: "center", color: w > 0 ? "#c8d8e4" : "#3a5060", fontSize: 11 }}>{w}</span>
+                      <button onClick={() => updateShapeWeight(id, 1)} style={stepper}>+</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={sectionLabel}>Cell Counts</div>
+            <div style={{ marginBottom: 16 }}>
+              {["accent", "stroke", "solid"].map((type) => {
+                const count = params.cellTypeCounts[type];
+                return (
+                  <div key={type} style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 5 }}>
+                    <span style={{ fontSize: 11, color: "#8aa4b8", textTransform: "capitalize" }}>{type}</span>
+                    <div style={{ display: "flex", alignItems: "center", gap: 4 }}>
+                      <button onClick={() => updateCellCount(type, -1)} style={stepper}>−</button>
+                      <span style={{ width: 18, textAlign: "center", fontSize: 11, color: "#c8d8e4" }}>{count}</span>
+                      <button onClick={() => updateCellCount(type, 1)} style={stepper}>+</button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div style={sectionLabel}>Stroke</div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: "#8aa4b8" }}>Width</span>
+                <span style={{ fontSize: 10, color: "#6b8a9e", fontFamily: "monospace" }}>{params.strokeWidth.toFixed(1)}</span>
+              </div>
+              <input type="range" min="0.5" max="4" step="0.1" value={params.strokeWidth}
+                onChange={(e) => setParams(p => ({ ...p, strokeWidth: parseFloat(e.target.value) }))}
+                style={{ width: "100%", marginBottom: 10, accentColor: "#6b92b5" }} />
+              <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 6 }}>
+                <span style={{ fontSize: 11, color: "#8aa4b8" }}>Opacity</span>
+                <span style={{ fontSize: 10, color: "#6b8a9e", fontFamily: "monospace" }}>{params.strokeOpacity.toFixed(2)}</span>
+              </div>
+              <input type="range" min="0" max="1" step="0.05" value={params.strokeOpacity}
+                onChange={(e) => setParams(p => ({ ...p, strokeOpacity: parseFloat(e.target.value) }))}
+                style={{ width: "100%", accentColor: "#6b92b5" }} />
+            </div>
+
             <div style={sectionLabel}>Grid Map</div>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 2, marginBottom: 12 }}>
               {grid.flat().map((cell, i) => {
                 const icons = { cutout: "◐", accent: "●", stroke: "○", solid: "■" };
+                const shapeIcons = { quarter: "¼", half: "½", square: "□", "half-square": "▬", triangle: "△", "half-triangle": "◺", hexagon: "⬡", "half-hexagon": "⬡½" };
                 const colors = {
                   cutout: "#ffffff20", accent: cell.accentColor + "55",
                   stroke: "#ffffff10", solid: bgColor + "88",
@@ -377,7 +591,9 @@ export default function MaskPatternGenerator() {
                   }}>
                     <span style={{ fontSize: 12 }}>{icons[cell.type]}</span>
                     <span style={{ fontSize: 7 }}>
-                      {cell.type !== "solid" ? `${cell.shape === "half" ? "½" : "¼"} ${cell.variant}` : "solid"}
+                      {cell.type !== "solid"
+                        ? `${shapeIcons[cell.shape] || cell.shape} ${cell.variant}`
+                        : `${shapeIcons[cell.shape] || cell.shape} solid`}
                     </span>
                   </div>
                 );
@@ -388,15 +604,15 @@ export default function MaskPatternGenerator() {
             <div style={{ display: "flex", gap: 6, flexWrap: "wrap", marginBottom: 14 }}>
               {[
                 { label: "Image", count: stats.cutout, color: "#ffffff" },
-                { label: "Accent", count: stats.accent, max: 2, color: accents[1] },
-                { label: "Stroke", count: stats.stroke, max: 2, color: accents[0] },
-                { label: "Solid", count: stats.solid, max: 2, color: bgColor },
+                { label: "Accent", count: stats.accent, max: params.cellTypeCounts.accent, color: accents[1] },
+                { label: "Stroke", count: stats.stroke, max: params.cellTypeCounts.stroke, color: accents[0] },
+                { label: "Solid", count: stats.solid, max: params.cellTypeCounts.solid, color: bgColor },
               ].map((s, i) => (
                 <div key={i} style={{
                   padding: "3px 8px", borderRadius: 3, fontSize: 10,
                   background: s.color + "22", border: `1px solid ${s.color}33`, color: "#8aa4b8",
                 }}>
-                  {s.label}: {s.count}{s.max ? `/${s.max}` : ""}
+                  {s.label}: {s.count}{s.max != null ? `/${s.max}` : ""}
                 </div>
               ))}
             </div>
@@ -424,4 +640,10 @@ const sectionLabel = {
 const actionBtn = {
   border: "1px solid #2a3e4d", color: "#c8d8e4", padding: "8px 12px",
   borderRadius: 3, fontSize: 11, cursor: "pointer", fontFamily: "inherit",
+};
+const stepper = {
+  background: "#1a2a33", border: "1px solid #2a3e4d", color: "#8aa4b8",
+  width: 20, height: 20, borderRadius: 2, fontSize: 12, cursor: "pointer",
+  fontFamily: "inherit", display: "flex", alignItems: "center", justifyContent: "center",
+  padding: 0, lineHeight: 1,
 };
